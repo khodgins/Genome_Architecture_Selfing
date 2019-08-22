@@ -1,0 +1,300 @@
+
+initialize() {
+	
+	//id the type
+	initializeSLiMModelType("nonWF");
+	initializeSLiMOptions(preventIncidentalSelfing=F);
+	
+	//define constant for standard deviation around optimum
+	//defineConstant("sd", 0.5);
+	
+	//define constant for selfing rate
+	//defineConstant("s", 1.0); //selfing = 0 outcrossing =1
+	
+	//define constant for pollen flow
+	//defineConstant("m", 0.9); //.9 = .1 pollen from the alternative population
+	
+	//define constant for pop size max
+	defineConstant("K", 1000);
+	
+	defineConstant("step", 1000); //how frequently censused
+	
+	defineConstant("delta", 0.002); //the amount the optimum changes each generation
+	
+	defineConstant("full", 100000); //only record the full output after 100000 generations (75k generation - 150 time points)
+	
+	defineConstant("gene_no", 5000); //total gene number
+	
+	defineConstant("phen_no", 5000); //number that can contribute to adaptation
+	
+	initializeMutationRate(1e-8);
+	initializeRecombinationRate(4e-8);
+	
+	// neutral mutations in non-coding regions
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	
+	//This will deterimine the distribution of effect sizes of the quantitative trait loci
+	initializeMutationType("m2", 0.5, "n", 0.0, 0.3);
+	
+	initializeMutationType("m3", 0.1, "g", -0.03, 0.2);  // deleterious gamma distribution completely recessive (0) vs additive (0.5)
+	
+	//initializeGenomicElementType("g1", m1, 1.0); //only neutral - to reduce simulation size do not initialize
+	
+	initializeGenomicElementType("g2", c(m1, m2, m3), c(0.25, 0.005, 0.745));
+	//neutral, deleterious and conditionally benefical 
+	
+	initializeGenomicElementType("g3", c(m1, m3), c(0.25, 0.75));
+	//neutral, deleterious and conditionally benefical 
+			
+	qtl = c(m2);
+	
+	qtl.mutationStackGroup = -1;
+	
+	qtl.convertToSubstitution = F;
+	
+	//CREATE group and allow l for group
+	qtl.mutationStackPolicy = "l";//use a “last mutation” stacking policy, so that when a new mutation occurs at a given QTL it replaces the allele that was previously at that site, rather than “stacking” with it as is SLiM’s default behavior
+	
+	defineConstant("W", 4000); // size of neutral buffer on each side 
+	pos = 0;
+	
+	//chrom1 100 genes with ben, del and neutral mutations
+		adapt=sample(seq(1,gene_no),phen_no);
+		line=paste(c(adapt));
+		writeFile("adapt_loci.txt", line, append=F);
+	for (j in 1:gene_no){
+		
+		if(any(adapt == j)){
+			initializeGenomicElement(g2, pos, pos + 999); //the gene will be 1000 bp
+		pos = pos+1000;
+		}else{
+			initializeGenomicElement(g3, pos, pos + 999); //the gene will be 1000 bp
+		pos = pos+1000;
+		}
+	//	initializeGenomicElement(g1, pos, pos + W-1); //first region ranges from 0-1000-1
+		pos = pos + W;
+	}
+
+}
+
+reproduction() {
+			
+	// determine how many outcrossed ovules were fertilized, out of the total
+	fertilizedOvules = rbinom(1, 10, 0.5);
+	
+	outcrossed = ifelse(runif(fertilizedOvules) < s, 1, 0);
+
+	for (source in outcrossed){
+		if(source==1){
+
+			// determine the pollen source for each fertilized ovule
+			other = (subpop == p1) ? p2 else p1;
+			pollenSource = ifelse(runif(source) < m, subpop, other); //
+			
+			// generate seeds from each fertilized ovule
+			// the ovule belongs to individual, the pollen comes from source
+			subpop.addCrossed(individual, pollenSource.sampleIndividuals(1));
+		
+		}else{
+			subpop.addSelfed(individual);
+
+		}
+	}
+}
+
+
+1 early() {
+	sim.addSubpop("p1", 1000);
+	sim.addSubpop("p2", 1000);
+	sim.setValue("q", step); //q is the output frequency
+}
+
+
+early() { //add for standing variation initially
+	gen = sim.generation;
+	if(gen == 1){
+		sim.setValue("opt1", 0.0);
+		sim.setValue("opt2", 0.0);
+	}else{
+		if(sim.getValue("opt1") <= 1 ){
+			sim.setValue("opt1", sim.getValue("opt1") + delta);
+			//print(sim.getValue("opt1"));
+		}
+		if(sim.getValue("opt2") >= -1 ){
+			sim.setValue("opt2", sim.getValue("opt2") - delta);
+			//print(sim.getValue("opt2"));
+		}
+	
+	}
+	
+	// QTL-based fitness
+	
+	inds = sim.subpopulations.individuals;
+	
+	//phenotypes reflect the sum of the mutations of type m2 for each individual
+	phenotypes = inds.sumOfMutationsOfType(m2);
+	
+	//create two different optimum for each subpop
+	p1.individuals.tagF = sim.getValue("opt1");
+	p2.individuals.tagF = sim.getValue("opt2");
+	optimum = c(p1.individuals.tagF,p2.individuals.tagF);
+	
+	//determine the deviation from the optimum for each individual
+	deviations = optimum - phenotypes;
+	
+	//fitness function max (to scale between 0 and 1
+	fitnessFunctionMax = dnorm(0.0, 0.0, sd);
+	
+	//how far the individual is off the max fitness - on the optimum give adaptation value of 1 while further away gives values closer to 0
+	adaptation = dnorm(deviations, 0.0, sd) / fitnessFunctionMax;
+	
+	//a perfectly adapted individual will have a fitness on 1 while a completely mal adapted inidividual will have a fitness floor of .1 to allow the population to be maintained
+	inds.fitnessScaling = 0.1 + adaptation * 0.9;
+	inds.tagF = phenotypes;   // just for output below
+	
+	// density-dependence 
+	p1.fitnessScaling = (K / p1.individualCount); 
+	p2.fitnessScaling = (K / p2.individualCount);
+}
+
+fitness(m2) { return 1.0; } //make m2 mutations neutral now so the fitness will be scaled by distance to the opt phenotype
+
+1:500000 late() {
+	gen = sim.generation;
+	if(gen == 1){
+		header = paste(c("#Gen ", "Pop ", "Freq"));
+		writeFile("freq_p1.txt", header, append=F);
+		writeFile("freq_p2.txt", header, append=F);
+		writeFile("freq.txt", header, append=F);
+		header2 = paste(c("#Pop ", "Gen ", "N", "Mean", "SD"));
+		writeFile("phenotype.txt", header2, append=F);
+		header3 = paste(c("#id", "position", "selcoeff"));
+		writeFile("mutations.txt", header3, append=F);
+		header4 = paste(c("#Gen ", "fst"));
+		writeFile("fst.txt", header4, append=F);
+		header5 = paste(c("#FULL")); //ADD
+		writeFile("full.txt", header5, append=F); //ADD
+		header6 = paste(c("#id", "type", "position", "selcoeff", "pop", "gen", "pop", "count")); //ADD
+		writeFile("m1.txt", header6, append=F); 
+		writeFile("m2.txt", header6, append=F); 
+		writeFile("m3.txt", header6, append=F); 
+	}
+	
+	if (p1.individualCount == 0 | p2.individualCount == 0){
+		if (p1.individualCount == 0)
+		{
+			// stop at extinction
+			line="P1 extinction in generation " + sim.generation + "."; //add
+			writeFile("phenotype.txt", line, append=T); //add 
+			sim.simulationFinished();
+		}if (p2.individualCount == 0)
+		{
+			// stop at extinction
+			line="P2 extinction in generation " + sim.generation + "."; //add
+			writeFile("phenotype.txt", line, append=T); //add 
+			sim.simulationFinished();
+		}
+	}
+	else
+	{
+		x= sim.getValue("q");
+		if ((gen - x) == 0){
+			sim.setValue("q", x + step);
+			
+			// output the phenotypic mean and pop size
+			phenotypes1 = p1.individuals.tagF;
+			
+			if (size(phenotypes1) > 1){
+				sd1 = sd(phenotypes1);
+			}else{
+				sd1 = NA;
+			}
+			
+			line= "p1 " + sim.generation + " " + p1.individualCount + " " + mean(phenotypes1) + " " + sd1;
+			writeFile("phenotype.txt", line, append=T);
+			
+			
+			phenotypes2 = p2.individuals.tagF;
+			
+			if (size(phenotypes2) > 1){
+				sd2 = sd(phenotypes2);
+			}else{
+				sd2 = NA;
+			}
+			
+			line= "p2 " + sim.generation + " " + p2.individualCount + " " + mean(phenotypes2) + " " + sd2;
+			writeFile("phenotype.txt", line, append=T);
+			
+			p1m=NULL;
+			for (mut in sim.mutationFrequencies(p1)){
+				//cat(mut);
+				//catn();
+				p1m = paste(c(p1m, mut));
+			}
+			p1m = paste(c(sim.generation, "pop1", p1m, "\n"));
+			writeFile("freq_p1.txt", p1m, append=T);
+			
+			//cat(p1m);
+			p2m=NULL;
+			for (mut in sim.mutationFrequencies(p2)){
+				//cat(mut);
+				//catn();
+				p2m = paste(c(p2m, mut));
+			}
+			p2m = paste(c(sim.generation, "pop2", p2m, "\n"));
+			writeFile("freq_p2.txt", p2m, append=T);
+			
+			pm=NULL;
+			for (mut in sim.mutationFrequencies(NULL)){
+				//cat(mut);
+				//catn();
+				pm = paste(c(pm, mut));
+			}
+			pm = paste(c(sim.generation, "pop2", pm, "\n"));
+			writeFile("freq.txt", pm, append=T);
+			
+			//cat(vector(p1_p));
+			lines = sapply(sim.mutations, "paste(c(applyValue.id,' ', applyValue.position, ' ',applyValue.selectionCoeff, '\\n'), '');");
+			file = paste(lines, "");
+			writeFile("mutations.txt", paste(c("#Gen", sim.generation)), append=T);
+			writeFile("mutations.txt", file, append=T);
+			sim.outputMutations(sim.mutationsOfType(m1), "m1.txt", append=T);
+			sim.outputMutations(sim.mutationsOfType(m2), "m2.txt", append=T);					sim.outputMutations(sim.mutationsOfType(m3), "m3.txt", append=T);		
+			
+			p1_p = sim.mutationFrequencies(p1);
+			p2_p = sim.mutationFrequencies(p2);
+			
+			
+			mean_p = (p1_p + p2_p) / 2.0;
+			H_t = 2.0 * mean_p * (1.0 - mean_p);
+			H_s = p1_p * (1.0 - p1_p) + p2_p * (1.0 - p2_p);
+			fst = 1.0 - H_s/H_t;
+			fsto=NULL;
+			for (f in fst){
+				fsto = paste(c(fsto, f));
+			}
+			fsto = paste(c(sim.generation, fsto, "\n"));
+			writeFile("fst.txt", fsto, append=T);
+			//if(sim.generation == full){ //remove this
+			//sim.outputFull("full.txt", append=F);
+			//}
+			if(sim.generation > full){
+				sim.outputFull("full.txt", append=F);
+			}
+		}
+	}
+}
+
+
+
+function (f$)calcFST(o<Subpopulation>$ subpop1, o<Subpopulation>$ subpop2)
+{
+	p1_p = sim.mutationFrequencies(subpop1);
+	p2_p = sim.mutationFrequencies(subpop2);
+	mean_p = (p1_p + p2_p) / 2.0;
+	H_t = 2.0 * mean_p * (1.0 - mean_p);
+	H_s = p1_p * (1.0 - p1_p) + p2_p * (1.0 - p2_p);
+	fst = 1.0 - H_s/H_t;
+	return mean(fst);
+}
+
